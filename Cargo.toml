@@ -1,0 +1,21 @@
+[package]
+name = "softty"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.70"
+
+[dependencies]
+ab_glyph = "0.2"
+libc = "0.2"
+memmap2 = "0.9"
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+wayland-client = "0.31"
+wayland-protocols = { version = "0.32", features = ["client", "staging", "unstable"] }
+unicode-width = "0.2"
+xkbcommon = "0.8"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
