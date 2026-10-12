@@ -27,6 +27,15 @@ Benchmark 2: softty -e true (183 runs)
   Memory [MiB]      9.3 ±   0.1    9.0 …   9.4   -70.7%  (3.4x less)
 ```
 
+## Installation
+
+### Arch Linux
+```sh
+yay -S softty-git
+```
+### Other
+Softty is not available on other repositories yet, please build it from source.
+
 ## Building
 
 Requires Rust 1.70 or newer.
