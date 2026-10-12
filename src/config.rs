@@ -266,7 +266,131 @@ impl Config {
 }
 
 /// Written to the config path on first run. Every value in it is a default.
-const TEMPLATE: &str = include_str!("../config.example.toml");
+const TEMPLATE: &str = r##"# softty configuration
+# Created on first run at ~/.config/softty/config.toml (or $XDG_CONFIG_HOME/softty/config.toml).
+# Every key is optional; anything you leave out uses the default shown here.
+# Colors are "#rrggbb" strings.
+
+# $TERM exported to the shell
+term = "xterm-256color"
+
+[window]
+title = "softty"
+app_id = "softty"
+cols = 80          # initial size in cells
+rows = 24
+border = 10        # padding around the grid, in pixels
+alpha = 0.5         # background opacity, 0.0 (clear) to 1.0 (opaque)
+
+[font]
+family = "Iosevka Nerd Font"   # anything fontconfig can match
+size = 24.0
+zoom_step = 2.0
+
+[mouse]
+word_delims = " `'\"()[]{}<>|&;,"   # characters that end a word on double-click
+multi_click_ms = 300                 # max gap between clicks for double/triple click
+scroll_lines = 3                     # lines per wheel notch (history, or arrow keys on the alternate screen)
+url_launcher = "xdg-open"
+
+[scrollback]
+lines = 10000                        # history kept per terminal, 0 turns scrollback off
+
+[colors]
+foreground = "#a9b1d6"
+background = "#1a1b26"
+# 16 ANSI colors: 8 normal, then 8 bright
+palette = [
+  "#15161e", "#f7768e", "#9ece6a", "#e0af68", "#7aa2f7", "#bb9af7", "#7dcfff", "#a9b1d6",
+  "#414868", "#f7768e", "#9ece6a", "#e0af68", "#7aa2f7", "#bb9af7", "#7dcfff", "#c0caf5",
+]
+
+[cursor]
+style = "block"            # "block", "beam" or "underline"
+color = "#7aa2f7"
+text = "#1a1b26"       # glyph color under a block cursor
+thickness = 2          # width of beam / height of underline, in pixels
+
+# Shortcuts. Setting any [[shortcuts]] replaces the whole default list.
+# mods: "shift", "alt", "ctrl". key: an xkb keysym name (C, Insert, Page_Up, F5, ...).
+# action: copy, paste, zoom_in, zoom_out, zoom_reset,
+#         scroll_line_up, scroll_line_down, scroll_page_up, scroll_page_down, scroll_top, scroll_bottom
+# The scroll_* actions are passed on to the program instead on the alternate screen (vim, less, ...).
+[[shortcuts]]
+mods = ["ctrl", "shift"]
+key = "C"
+action = "copy"
+
+[[shortcuts]]
+mods = ["ctrl", "shift"]
+key = "V"
+action = "paste"
+
+[[shortcuts]]
+mods = ["ctrl"]
+key = "Insert"
+action = "copy"
+
+[[shortcuts]]
+mods = ["shift"]
+key = "Insert"
+action = "paste"
+
+[[shortcuts]]
+mods = ["ctrl", "shift"]
+key = "Prior"
+action = "zoom_in"
+
+[[shortcuts]]
+mods = ["ctrl", "shift"]
+key = "Next"
+action = "zoom_out"
+
+[[shortcuts]]
+mods = ["ctrl", "shift"]
+key = "Home"
+action = "zoom_reset"
+
+[[shortcuts]]
+mods = ["shift"]
+key = "Prior"          # Page Up
+action = "scroll_page_up"
+
+[[shortcuts]]
+mods = ["shift"]
+key = "Next"           # Page Down
+action = "scroll_page_down"
+
+[[shortcuts]]
+mods = ["shift"]
+key = "Home"
+action = "scroll_top"
+
+[[shortcuts]]
+mods = ["shift"]
+key = "End"
+action = "scroll_bottom"
+
+[[shortcuts]]
+mods = ["ctrl", "shift"]
+key = "R"
+action = "search"
+
+[[shortcuts]]
+mods = ["ctrl", "shift"]
+key = "Z"
+action = "prev_prompt"
+
+[[shortcuts]]
+mods = ["ctrl", "shift"]
+key = "X"
+action = "next_prompt"
+
+[[shortcuts]]
+mods = ["ctrl", "shift"]
+key = "N"
+action = "new_window"
+"##;
 
 static CONFIG: OnceLock<Config> = OnceLock::new();
 

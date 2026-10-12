@@ -1,0 +1,103 @@
+# softty configuration
+# Copy to ~/.config/softty/config.toml (or $XDG_CONFIG_HOME/softty/config.toml).
+# Every key is optional; anything you leave out uses the default shown here.
+# Colors are "#rrggbb" strings.
+
+# $TERM exported to the shell
+term = "xterm-256color"
+
+[window]
+title = "softty"
+app_id = "softty"
+cols = 80          # initial size in cells
+rows = 24
+border = 10        # padding around the grid, in pixels
+alpha = 0.93        # background opacity, 0.0 (clear) to 1.0 (opaque)
+
+[font]
+family = "JetBrains Mono Nerd Font"   # anything fontconfig can match
+size = 18.0
+zoom_step = 2.0
+
+[mouse]
+word_delims = " `'\"()[]{}<>|&;,"   # characters that end a word on double-click
+multi_click_ms = 300                 # max gap between clicks for double/triple click
+scroll_lines = 3                     # lines per wheel notch (history, or arrow keys on the alternate screen)
+
+[scrollback]
+lines = 10000                        # history kept per terminal, 0 turns scrollback off
+
+[colors]
+foreground = "#d3c6aa"
+background = "#272e33"
+# 16 ANSI colors: 8 normal, then 8 bright
+palette = [
+  "#374247", "#e67e80", "#a7c080", "#dbbc7f", "#7fbbb3", "#d699b6", "#83c092", "#859289",
+  "#4f585e", "#e67e80", "#a7c080", "#dbbc7f", "#7fbbb3", "#d699b6", "#83c092", "#d3c6aa",
+]
+
+[cursor]
+style = "underline"        # "block", "beam" or "underline"
+color = "#d3c6aa"
+text = "#272e33"       # glyph color under a block cursor
+thickness = 2          # width of beam / height of underline, in pixels
+
+# Shortcuts. Setting any [[shortcuts]] replaces the whole default list.
+# mods: "shift", "alt", "ctrl". key: an xkb keysym name (C, Insert, Page_Up, F5, ...).
+# action: copy, paste, zoom_in, zoom_out, zoom_reset,
+#         scroll_line_up, scroll_line_down, scroll_page_up, scroll_page_down, scroll_top, scroll_bottom
+# The scroll_* actions are passed on to the program instead on the alternate screen (vim, less, ...).
+[[shortcuts]]
+mods = ["ctrl", "shift"]
+key = "C"
+action = "copy"
+
+[[shortcuts]]
+mods = ["ctrl", "shift"]
+key = "V"
+action = "paste"
+
+[[shortcuts]]
+mods = ["ctrl"]
+key = "Insert"
+action = "copy"
+
+[[shortcuts]]
+mods = ["shift"]
+key = "Insert"
+action = "paste"
+
+[[shortcuts]]
+mods = ["ctrl", "shift"]
+key = "Prior"
+action = "zoom_in"
+
+[[shortcuts]]
+mods = ["ctrl", "shift"]
+key = "Next"
+action = "zoom_out"
+
+[[shortcuts]]
+mods = ["ctrl", "shift"]
+key = "Home"
+action = "zoom_reset"
+
+[[shortcuts]]
+mods = ["shift"]
+key = "Prior"          # Page Up
+action = "scroll_page_up"
+
+[[shortcuts]]
+mods = ["shift"]
+key = "Next"           # Page Down
+action = "scroll_page_down"
+
+[[shortcuts]]
+mods = ["shift"]
+key = "Home"
+action = "scroll_top"
+
+[[shortcuts]]
+mods = ["shift"]
+key = "End"
+action = "scroll_bottom"
