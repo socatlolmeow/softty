@@ -38,7 +38,7 @@ pub enum Action {
     NewWindow,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     pub term: String,
@@ -51,7 +51,7 @@ pub struct Config {
     pub shortcuts: Vec<Shortcut>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
 #[serde(default, deny_unknown_fields)]
 pub struct Window {
     pub title: String,
@@ -62,7 +62,7 @@ pub struct Window {
     pub alpha: f32,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
 #[serde(default, deny_unknown_fields)]
 pub struct Font {
     pub family: String,
@@ -70,22 +70,24 @@ pub struct Font {
     pub zoom_step: f32,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
 #[serde(default, deny_unknown_fields)]
 pub struct Mouse {
     pub word_delims: String,
     pub multi_click_ms: u64,
     pub scroll_lines: usize,
     pub url_launcher: String,
+    pub copy_on_select: bool,
+    pub right_click_paste: bool,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
 #[serde(default, deny_unknown_fields)]
 pub struct Scrollback {
     pub lines: usize,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
 #[serde(default, deny_unknown_fields)]
 pub struct Colors {
     #[serde(deserialize_with = "color")]
@@ -96,7 +98,7 @@ pub struct Colors {
     pub palette: [u32; 16],
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
 #[serde(default, deny_unknown_fields)]
 pub struct Cursor {
     pub style: CursorStyle,
@@ -105,9 +107,11 @@ pub struct Cursor {
     #[serde(deserialize_with = "color")]
     pub text: u32,
     pub thickness: usize,
+    pub blink: bool,
+    pub blink_interval: u64,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
 #[serde(try_from = "RawShortcut")]
 pub struct Shortcut {
     pub mods: u8,
@@ -115,7 +119,7 @@ pub struct Shortcut {
     pub action: Action,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
 #[serde(deny_unknown_fields)]
 struct RawShortcut {
     #[serde(default)]
@@ -220,7 +224,7 @@ impl Default for Font {
 
 impl Default for Mouse {
     fn default() -> Mouse {
-        Mouse { word_delims: " `'\"()[]{}<>|&;,".into(), multi_click_ms: 300, scroll_lines: 3, url_launcher: "xdg-open".into() }
+        Mouse { word_delims: " `'\"()[]{}<>|&;,".into(), multi_click_ms: 300, scroll_lines: 3, url_launcher: "xdg-open".into(), copy_on_select: true, right_click_paste: true }
     }
 }
 
@@ -245,7 +249,7 @@ impl Default for Colors {
 
 impl Default for Cursor {
     fn default() -> Cursor {
-        Cursor { style: CursorStyle::Block, color: 0x7aa2f7, text: 0x1a1b26, thickness: 2 }
+        Cursor { style: CursorStyle::Block, color: 0x7aa2f7, text: 0x1a1b26, thickness: 2, blink: true, blink_interval: 500 }
     }
 }
 
@@ -292,6 +296,8 @@ word_delims = " `'\"()[]{}<>|&;,"   # characters that end a word on double-click
 multi_click_ms = 300                 # max gap between clicks for double/triple click
 scroll_lines = 3                     # lines per wheel notch (history, or arrow keys on the alternate screen)
 url_launcher = "xdg-open"
+copy_on_select = true                # copy the selection to the clipboard automatically
+right_click_paste = true             # paste on right mouse button
 
 [scrollback]
 lines = 10000                        # history kept per terminal, 0 turns scrollback off
@@ -310,6 +316,8 @@ style = "block"            # "block", "beam" or "underline"
 color = "#7aa2f7"
 text = "#1a1b26"       # glyph color under a block cursor
 thickness = 2          # width of beam / height of underline, in pixels
+blink = true             # blink the cursor while focused
+blink_interval = 500     # cursor blink interval in milliseconds
 
 # Shortcuts. Setting any [[shortcuts]] replaces the whole default list.
 # mods: "shift", "alt", "ctrl". key: an xkb keysym name (C, Insert, Page_Up, F5, ...).
@@ -392,15 +400,15 @@ key = "N"
 action = "new_window"
 "##;
 
-static CONFIG: OnceLock<Config> = OnceLock::new();
+static CONFIG: OnceLock<std::sync::Mutex<Config>> = OnceLock::new();
 
 /// The active configuration. Falls back to the defaults if `load` has not run.
-pub fn get() -> &'static Config {
-    CONFIG.get_or_init(Config::default)
+pub fn get() -> Config {
+    CONFIG.get_or_init(|| std::sync::Mutex::new(Config::default())).lock().unwrap().clone()
 }
 
 /// `$XDG_CONFIG_HOME/softty/config.toml`, which is `~/.config/softty/config.toml` by default.
-fn path() -> Option<PathBuf> {
+pub fn path() -> Option<PathBuf> {
     let base = match std::env::var_os("XDG_CONFIG_HOME") {
         Some(dir) if !dir.is_empty() => PathBuf::from(dir),
         _ => PathBuf::from(std::env::var_os("HOME")?).join(".config"),
@@ -417,7 +425,14 @@ pub fn load() -> Option<String> {
         Some(Ok(config)) => (config, None),
         None => (Config::default(), None),
     };
-    let _ = CONFIG.set(config);
+    match CONFIG.get() {
+        Some(mutex) => {
+            *mutex.lock().unwrap() = config.clone();
+        }
+        None => {
+            let _ = CONFIG.set(std::sync::Mutex::new(config));
+        }
+    }
     error
 }
 

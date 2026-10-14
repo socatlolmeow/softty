@@ -34,6 +34,10 @@ use wayland_client::{event_created_child, Connection, Dispatch, Proxy, QueueHand
 use wayland_protocols::wp::cursor_shape::v1::client::wp_cursor_shape_device_v1::{Shape, WpCursorShapeDeviceV1};
 use wayland_protocols::wp::cursor_shape::v1::client::wp_cursor_shape_manager_v1::WpCursorShapeManagerV1;
 use wayland_protocols::wp::primary_selection::zv1::client::zwp_primary_selection_device_manager_v1::ZwpPrimarySelectionDeviceManagerV1;
+use wayland_protocols::wp::text_input::zv3::client::zwp_text_input_manager_v3::ZwpTextInputManagerV3;
+use wayland_protocols::wp::text_input::zv3::client::zwp_text_input_v3::ZwpTextInputV3;
+use wayland_protocols::wp::text_input::zv3::client as zwp_text_input_v3_mod;
+use zwp_text_input_v3_mod::zwp_text_input_v3 as zwp_text_input_v3;
 use wayland_protocols::wp::primary_selection::zv1::client::zwp_primary_selection_device_v1::{self, ZwpPrimarySelectionDeviceV1};
 use wayland_protocols::wp::primary_selection::zv1::client::zwp_primary_selection_offer_v1::{self, ZwpPrimarySelectionOfferV1};
 use wayland_protocols::wp::primary_selection::zv1::client::zwp_primary_selection_source_v1::{self, ZwpPrimarySelectionSourceV1};
@@ -90,12 +94,14 @@ struct App {
     cursor_shape: Option<WpCursorShapeDeviceV1>,
     primary_manager: Option<ZwpPrimarySelectionDeviceManagerV1>,
     primary_device: Option<ZwpPrimarySelectionDeviceV1>,
+    text_input: Option<ZwpTextInputV3>,
     keyboard: Option<WlKeyboard>,
     pointer: Option<WlPointer>,
 
     xkb: xkb::Context,
     keymap: Option<xkb::Keymap>,
     xkb_state: Option<xkb::State>,
+    compose: Option<xkb::compose::State>,
     repeat: Option<Repeat>,
     repeat_rate: u64,
     repeat_delay: u64,
@@ -122,6 +128,10 @@ struct App {
     held: Option<u8>,
     last_cell: Pos,
     wheel: f64,
+    cursor_blink: bool,
+    cursor_blink_on: bool,
+    next_blink: Option<Instant>,
+    cursor_blink_interval: Duration,
 
     clip_text: String,
     clip_source: Option<WlDataSource>,
@@ -136,6 +146,7 @@ struct App {
 
     search: Option<Search>,
     sync_deadline: Option<Instant>,
+    config_mtime: Option<std::time::SystemTime>,
     exit: bool,
 }
 
@@ -277,7 +288,8 @@ impl App {
         let (selection, focused) = (self.selection, self.focused);
         let search = self.search.as_ref().map(|s| (s.query.clone(), s.found));
         let (cx, cy) = (term.cur.x, term.cur.y);
-        let cursor_visible = term.cursor_visible && term.view == 0;
+        let blink_ok = !self.cursor_blink || !self.focused || self.cursor_blink_on;
+        let cursor_visible = term.cursor_visible && term.view == 0 && blink_ok;
         let style = term.cursor_style.unwrap_or(config::get().cursor.style);
         let block = matches!(style, CursorStyle::Block);
         let colors = |x: usize, y: usize| {
@@ -319,7 +331,46 @@ impl App {
                     fill(px, w, ox, oy + ch / 2, cw, 1, 0xff000000 | fg);
                 }
                 if cell.flags & UNDERLINE != 0 {
-                    fill(px, w, ox, (oy + ascent + 1).min(oy + ch - 1), cw, 1, 0xff000000 | fg);
+                    let ul_color = if cell.ul_color != u32::MAX { cell.ul_color } else { fg };
+                    let color = 0xff000000 | ul_color;
+                    let base_y = (oy + ascent + 1).min(oy + ch - 1);
+                    match cell.underline {
+                        2 => {
+                            fill(px, w, ox, base_y, cw, 1, color);
+                            fill(px, w, ox, (base_y + 2).min(oy + ch - 1), cw, 1, color);
+                        }
+                        3 => {
+                            for xx in 0..cw {
+                                let yy = base_y + if xx % 3 == 1 { 0usize } else { 1usize };
+                                if oy + yy < oy + ch {
+                                    let idx = (oy + yy) * w + (ox + xx);
+                                    if idx < px.len() {
+                                        px[idx] = color;
+                                    }
+                                }
+                            }
+                        }
+                        4 => {
+                            let mut xx = 0;
+                            while xx < cw {
+                                fill(px, w, ox + xx, base_y, 1, 1, color);
+                                xx += 2;
+                            }
+                        }
+                        5 => {
+                            let mut xx = 0;
+                            while xx < cw {
+                                let seg = 3.min(cw - xx);
+                                fill(px, w, ox + xx, base_y, seg, 1, color);
+                                xx += 5;
+                            }
+                        }
+                        _ => fill(px, w, ox, base_y, cw, 1, color),
+                    }
+                }
+                if cell.link != 0 && cell.flags & UNDERLINE == 0 {
+                    let base_y = (oy + ascent + 1).min(oy + ch - 1);
+                    fill(px, w, ox, base_y, cw, 1, 0xff000000 | fg);
                 }
             }
         }
@@ -387,6 +438,11 @@ impl App {
         }
         if let Some(text) = self.term.clipboard.take() {
             self.set_clipboard(text, qh);
+        }
+        if let Some((title, body)) = self.term.notification.take() {
+            let mut cmd = Command::new("notify-send");
+            cmd.arg(title).arg(body);
+            launch(&mut cmd);
         }
         if !self.term.reply.is_empty() {
             let reply = std::mem::take(&mut self.term.reply);
@@ -640,6 +696,51 @@ impl App {
             self.search_key(sym, &text, mods, qh);
             return;
         }
+
+        // compose (dead keys)
+        let compose_result: Option<Option<String>> = if let Some(compose) = &mut self.compose {
+            let code = xkb::Keycode::new(key + 8);
+            let Some(state) = &self.xkb_state else { return; };
+            let keysym = state.key_get_one_sym(code);
+            if compose.feed(keysym) == xkb::compose::FeedResult::Accepted {
+                match compose.status() {
+                    xkb::compose::Status::Composed => {
+                        let out = compose.utf8();
+                        compose.reset();
+                        Some(Some(out.unwrap_or_default()))
+                    }
+                    xkb::compose::Status::Composing => {
+                        Some(None)
+                    }
+                    _ => {
+                        compose.reset();
+                        None
+                    }
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        match compose_result {
+            Some(Some(text)) => {
+                if !text.is_empty() {
+                    self.snap_to_bottom();
+                    self.pty.send(text.as_bytes());
+                }
+                self.cursor_blink_on = true;
+                if self.cursor_blink && self.focused {
+                    self.next_blink = Some(Instant::now() + self.cursor_blink_interval);
+                }
+                return;
+            }
+            Some(None) => {
+                return;
+            }
+            None => {}
+        }
+
         if let Some(shortcut) = config::get().shortcuts.iter().find(|s| s.mods == mods && s.sym == sym) {
             let page = self.term.rows.saturating_sub(1).max(1) as isize;
             let consumed = match shortcut.action {
@@ -685,6 +786,10 @@ impl App {
         if !bytes.is_empty() {
             self.snap_to_bottom();
             self.pty.send(&bytes);
+            self.cursor_blink_on = true;
+            if self.cursor_blink && self.focused {
+                self.next_blink = Some(Instant::now() + self.cursor_blink_interval);
+            }
         }
     }
 
@@ -891,6 +996,10 @@ impl Dispatch<WlKeyboard, ()> for App {
                 app.serial = serial;
                 app.focused = true;
                 app.dirty = true;
+                if let Some(ti) = &app.text_input {
+                    ti.enable();
+                    ti.commit();
+                }
                 if app.term.focus_events {
                     app.pty.send(b"\x1b[I");
                 }
@@ -899,6 +1008,10 @@ impl Dispatch<WlKeyboard, ()> for App {
                 app.focused = false;
                 app.repeat = None;
                 app.dirty = true;
+                if let Some(ti) = &app.text_input {
+                    ti.disable();
+                    ti.commit();
+                }
                 if app.term.focus_events {
                     app.pty.send(b"\x1b[O");
                 }
@@ -971,7 +1084,12 @@ impl Dispatch<WlPointer, ()> for App {
                 match (button, state) {
                     (BTN_LEFT, wl_pointer::ButtonState::Pressed) => {
                         let (x, y) = app.cell_at(app.mouse.0, app.mouse.1);
-                        let url = (app.mods() & config::CTRL != 0).then(|| app.term.url_at(x, y)).flatten();
+                        let ctrl = app.mods() & config::CTRL != 0;
+                        let url = if ctrl {
+                            app.term.link_at(x, y).map(str::to_string).or_else(|| app.term.url_at(x, y))
+                        } else {
+                            None
+                        };
                         match url {
                             Some(url) => app.open(&url),
                             None => app.click(),
@@ -980,10 +1098,14 @@ impl Dispatch<WlPointer, ()> for App {
                     (BTN_LEFT, wl_pointer::ButtonState::Released) => {
                         app.anchor = None;
                         if app.selection.is_some() {
+                            if config::get().mouse.copy_on_select {
+                                app.copy(qh);
+                            }
                             app.publish_primary(qh);
                         }
                     }
                     (BTN_MIDDLE, wl_pointer::ButtonState::Pressed) => app.paste(true),
+                    (BTN_RIGHT, wl_pointer::ButtonState::Pressed) if config::get().mouse.right_click_paste => app.paste(false),
                     _ => {}
                 }
             }
@@ -1080,11 +1202,26 @@ impl Dispatch<ZwpPrimarySelectionSourceV1, ()> for App {
     }
 }
 
+
+fn compose_state(ctx: &xkb::Context) -> Option<xkb::compose::State> {
+    let locale = std::env::var("LC_ALL")
+        .or_else(|_| std::env::var("LC_CTYPE"))
+        .or_else(|_| std::env::var("LANG"))
+        .unwrap_or_else(|_| "C.UTF-8".into());
+    if locale.is_empty() {
+        return None;
+    }
+    let table = xkb::compose::Table::new_from_locale(ctx, std::ffi::OsStr::new(&locale), xkb::compose::COMPILE_NO_FLAGS).ok()?;
+    Some(xkb::compose::State::new(&table, xkb::compose::STATE_NO_FLAGS))
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
     let config_error = config::load();
     let args: Vec<String> = std::env::args().skip(1).collect();
     let command = args.iter().position(|a| a == "-e").map_or(Vec::new(), |i| args[i + 1..].to_vec());
 
+    let xkb = xkb::Context::new(xkb::CONTEXT_NO_FLAGS);
+    let compose = compose_state(&xkb);
     let conn = Connection::connect_to_env()?;
     let (globals, mut queue) = registry_queue_init::<App>(&conn)?;
     let qh = queue.handle();
@@ -1098,6 +1235,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     let data_device = data_manager.get_data_device(&seat, &qh, ());
     let primary_manager = globals.bind::<ZwpPrimarySelectionDeviceManagerV1, _, _>(&qh, 1..=1, ()).ok();
     let primary_device = primary_manager.as_ref().map(|m| m.get_device(&seat, &qh, ()));
+    let text_input: Option<ZwpTextInputV3> = globals.bind::<ZwpTextInputManagerV3, _, _>(&qh, 1..=1, ()).ok()
+        .as_ref().map(|m| m.get_text_input(&seat, &qh, ()));
 
     let surface = compositor.create_surface(&qh, ());
     let xdg_surface = wm_base.get_xdg_surface(&surface, &qh, ());
@@ -1125,9 +1264,11 @@ fn main() -> Result<(), Box<dyn Error>> {
         cursor_shape: None,
         primary_manager,
         primary_device,
+        text_input,
         keyboard: None,
         pointer: None,
-        xkb: xkb::Context::new(xkb::CONTEXT_NO_FLAGS),
+        xkb,
+        compose,
         keymap: None,
         xkb_state: None,
         repeat: None,
@@ -1153,6 +1294,10 @@ fn main() -> Result<(), Box<dyn Error>> {
         held: None,
         last_cell: (0, 0),
         wheel: 0.0,
+        cursor_blink: config::get().cursor.blink,
+        cursor_blink_on: true,
+        next_blink: None,
+        cursor_blink_interval: Duration::from_millis(config::get().cursor.blink_interval.max(1)),
         clip_text: String::new(),
         clip_source: None,
         offer: None,
@@ -1165,10 +1310,32 @@ fn main() -> Result<(), Box<dyn Error>> {
         primary_mimes: Vec::new(),
         search: None,
         sync_deadline: None,
+        config_mtime: None,
         exit: false,
     };
 
     loop {
+        // live config reload
+        let current_mtime = config::path().and_then(|p| std::fs::metadata(p).ok()).and_then(|m| m.modified().ok());
+        if app.config_mtime.is_some() && app.config_mtime != current_mtime {
+            let _ = config::load();
+            app.cursor_blink = config::get().cursor.blink;
+            app.cursor_blink_interval = Duration::from_millis(config::get().cursor.blink_interval.max(1));
+            app.fonts.set_size(config::get().font.size);
+            app.dirty = true;
+        }
+        app.config_mtime = current_mtime;
+
+        // blink timer scheduling
+        if app.focused && app.cursor_blink {
+            if app.next_blink.is_none() {
+                app.next_blink = Some(Instant::now() + app.cursor_blink_interval);
+            }
+        } else {
+            app.cursor_blink_on = true;
+            app.next_blink = None;
+        }
+
         queue.dispatch_pending(&mut app)?;
         app.draw(&qh);
         if app.exit {
@@ -1189,7 +1356,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             fds.push(libc::pollfd { fd: file.as_raw_fd(), events: libc::POLLIN, revents: 0 });
         }
         let now = Instant::now();
-        let timeout = [app.repeat.map(|r| r.next), app.sync_deadline]
+        let timeout = [app.repeat.map(|r| r.next), app.sync_deadline, app.next_blink]
             .into_iter()
             .flatten()
             .map(|deadline| deadline.saturating_duration_since(now).as_millis() as i32 + 1)
@@ -1225,6 +1392,35 @@ fn main() -> Result<(), Box<dyn Error>> {
                 app.repeat = Some(Repeat { key: repeat.key, next: repeat.next + Duration::from_millis(1000 / app.repeat_rate.max(1)) });
                 app.on_key(repeat.key, &qh);
             }
+        }
+        if app.focused && app.cursor_blink {
+            if let Some(deadline) = app.next_blink {
+                if Instant::now() >= deadline {
+                    app.cursor_blink_on = !app.cursor_blink_on;
+                    app.next_blink = Some(Instant::now() + app.cursor_blink_interval);
+                    app.dirty = true;
+                }
+            }
+        }
+    }
+}
+
+impl Dispatch<ZwpTextInputManagerV3, ()> for App {
+    fn event(_: &mut Self, _: &ZwpTextInputManagerV3, _: <ZwpTextInputManagerV3 as Proxy>::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {}
+}
+
+impl Dispatch<ZwpTextInputV3, ()> for App {
+    fn event(app: &mut Self, _: &ZwpTextInputV3, event: <ZwpTextInputV3 as Proxy>::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {
+        match event {
+            zwp_text_input_v3::Event::CommitString { text, .. } => {
+                if let Some(t) = text {
+                    app.pty.send(t.as_bytes());
+                    app.dirty = true;
+                }
+            }
+            zwp_text_input_v3::Event::Enter { surface } => { let _ = surface; }
+            zwp_text_input_v3::Event::Leave { surface } => { let _ = surface; }
+            _ => {}
         }
     }
 }

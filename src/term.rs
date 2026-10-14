@@ -30,11 +30,14 @@ pub struct Cell {
     pub fg: u32,
     pub bg: u32,
     pub flags: u8,
+    pub underline: u8,
+    pub ul_color: u32,
+    pub link: u32,
 }
 
 impl Cell {
     fn blank(bg: u32) -> Cell {
-        Cell { ch: ' ', fg: default_fg(), bg, flags: 0 }
+        Cell { ch: ' ', fg: default_fg(), bg, flags: 0, underline: 0, ul_color: u32::MAX, link: 0 }
     }
 }
 
@@ -45,6 +48,8 @@ pub struct Cursor {
     fg: u32,
     bg: u32,
     flags: u8,
+    underline: u8,
+    underline_color: u32,
     wrap_next: bool,
     gfx: bool,
     origin: bool,
@@ -52,7 +57,7 @@ pub struct Cursor {
 
 impl Cursor {
     fn new() -> Cursor {
-        Cursor { x: 0, y: 0, fg: default_fg(), bg: default_bg(), flags: 0, wrap_next: false, gfx: false, origin: false }
+        Cursor { x: 0, y: 0, fg: default_fg(), bg: default_bg(), flags: 0, underline: 0, underline_color: u32::MAX, wrap_next: false, gfx: false, origin: false }
     }
 }
 
@@ -80,6 +85,9 @@ pub struct Term {
     pub title: Option<String>,
     pub reply: Vec<u8>,
     pub sync: bool,
+    pub hyperlinks: Vec<Option<String>>,
+    pub current_link: u32,
+    pub notification: Option<(String, String)>,
     pub focus_events: bool,
     pub cwd: Option<String>,
     pub clipboard: Option<String>,
@@ -98,6 +106,7 @@ pub struct Term {
     last: char,
     state: State,
     params: Vec<usize>,
+    param_seps: Vec<u8>,
     private: u8,
     inter: u8,
     osc: Vec<u8>,
@@ -199,6 +208,9 @@ impl Term {
             title: None,
             reply: Vec::new(),
             sync: false,
+            hyperlinks: vec![None],
+            current_link: 0,
+            notification: None,
             focus_events: false,
             cwd: None,
             clipboard: None,
@@ -217,6 +229,7 @@ impl Term {
             last: ' ',
             state: State::Ground,
             params: vec![0],
+            param_seps: vec![b';'],
             private: 0,
             inter: 0,
             osc: Vec::new(),
@@ -366,6 +379,18 @@ impl Term {
 
     pub fn lines(&self) -> usize {
         self.history.len() + self.rows
+    }
+
+    pub fn link_at(&self, x: usize, y: usize) -> Option<&str> {
+        if x >= self.cols || y >= self.rows {
+            return None;
+        }
+        let cell = self.cell(x, y);
+        if cell.link == 0 {
+            None
+        } else {
+            self.hyperlinks.get(cell.link as usize).and_then(|u| u.as_deref())
+        }
     }
 
     fn line_cells(&self, line: usize) -> &[Cell] {
@@ -595,6 +620,35 @@ impl Term {
         match cmd {
             "0" | "2" => self.title = Some(rest.to_string()),
             "7" => self.cwd = parse_cwd(rest),
+            "8" => {
+                let (params, uri) = rest.split_once(';').unwrap_or(("", rest));
+                let _ = params;
+                if uri.is_empty() {
+                    self.current_link = 0;
+                } else {
+                    let idx = match self.hyperlinks.iter().position(|u| u.as_deref() == Some(uri)) {
+                        Some(i) => i,
+                        None => {
+                            self.hyperlinks.push(Some(uri.to_string()));
+                            self.hyperlinks.len() - 1
+                        }
+                    };
+                    self.current_link = idx as u32;
+                }
+            }
+            "9" => {
+                if !rest.starts_with('4') || !rest.contains(';') {
+                    self.notification = Some(("softty".to_string(), rest.to_string()));
+                }
+            }
+            "777" => {
+                let mut it = rest.splitn(3, ';');
+                if it.next() == Some("notify") {
+                    let title = it.next().unwrap_or("softty").to_string();
+                    let body = it.next().unwrap_or("").to_string();
+                    self.notification = Some((title, body));
+                }
+            }
             "52" => {
                 let data = rest.split_once(';').map_or("", |(_, data)| data);
                 if let Some(text) = decode_base64(data).and_then(|bytes| String::from_utf8(bytes).ok()) {
@@ -618,6 +672,8 @@ impl Term {
             b'[' => {
                 self.params.clear();
                 self.params.push(0);
+                self.param_seps.clear();
+                self.param_seps.push(b';');
                 self.private = 0;
                 self.inter = 0;
                 self.state = State::Csi;
@@ -665,6 +721,7 @@ impl Term {
             b';' | b':' => {
                 if self.params.len() < 32 {
                     self.params.push(0);
+                    self.param_seps.push(b);
                 }
             }
             b'<'..=b'?' => self.private = b,
@@ -852,6 +909,7 @@ impl Term {
 
     fn sgr(&mut self) {
         let p = std::mem::take(&mut self.params);
+        let ps = std::mem::take(&mut self.param_seps);
         let mut i = 0;
         while i < p.len() {
             match p[i] {
@@ -859,22 +917,74 @@ impl Term {
                     self.cur.fg = default_fg();
                     self.cur.bg = default_bg();
                     self.cur.flags = 0;
+                    self.cur.underline = 0;
+                    self.cur.underline_color = u32::MAX;
                 }
                 1 => self.cur.flags |= BOLD,
                 2 => self.cur.flags |= DIM,
-                9 => self.cur.flags |= STRIKE,
-                4 => self.cur.flags |= UNDERLINE,
+                3 => self.cur.flags |= 0,
+                4 => {
+                    // colon sub-parameter selects underline style
+                    if i + 1 < p.len() && ps.get(i + 1) == Some(&b':') {
+                        let style = p[i + 1].min(5) as u8;
+                        if style == 0 {
+                            self.cur.flags &= !UNDERLINE;
+                            self.cur.underline = 0;
+                        } else {
+                            self.cur.flags |= UNDERLINE;
+                            self.cur.underline = style.max(1);
+                        }
+                        i += 1;
+                    } else {
+                        self.cur.flags |= UNDERLINE;
+                        if self.cur.underline == 0 {
+                            self.cur.underline = 1;
+                        }
+                    }
+                }
                 7 => self.cur.flags |= REVERSE,
+                9 => self.cur.flags |= STRIKE,
+                21 => {
+                    self.cur.flags |= UNDERLINE;
+                    self.cur.underline = 2;
+                }
                 22 => self.cur.flags &= !(BOLD | DIM),
-                29 => self.cur.flags &= !STRIKE,
-                24 => self.cur.flags &= !UNDERLINE,
+                24 => {
+                    self.cur.flags &= !UNDERLINE;
+                    self.cur.underline = 0;
+                }
                 27 => self.cur.flags &= !REVERSE,
+                29 => self.cur.flags &= !STRIKE,
                 30..=37 => self.cur.fg = palette(p[i] - 30),
                 40..=47 => self.cur.bg = palette(p[i] - 40),
                 90..=97 => self.cur.fg = palette(p[i] - 90 + 8),
                 100..=107 => self.cur.bg = palette(p[i] - 100 + 8),
                 39 => self.cur.fg = default_fg(),
                 49 => self.cur.bg = default_bg(),
+                58 => {
+                    // set underline color, mirroring 38
+                    let (color, used) = match (p.get(i + 1), p.get(i + 2), p.get(i + 3), p.get(i + 4), p.get(i + 5)) {
+                        (Some(5), Some(&n), _, _, _) => (Some(color256(n)), 2),
+                        (Some(2), Some(&0), Some(&r), Some(&g), Some(&b)) if r <= 255 && g <= 255 && b <= 255 => {
+                            (Some((r as u32) << 16 | (g as u32) << 8 | (b as u32)), 5)
+                        }
+                        (Some(2), Some(&r), Some(&g), Some(&b), _) if r <= 255 && g <= 255 && b <= 255 => {
+                            (Some((r as u32) << 16 | (g as u32) << 8 | (b as u32)), 4)
+                        }
+                        _ => (None, p.len()),
+                    };
+                    if let Some(c) = color {
+                        self.cur.underline_color = c;
+                        self.cur.flags |= UNDERLINE;
+                        if self.cur.underline == 0 {
+                            self.cur.underline = 1;
+                        }
+                    }
+                    i += used;
+                }
+                59 => {
+                    self.cur.underline_color = u32::MAX;
+                }
                 38 | 48 => {
                     let (color, used) = match (p.get(i + 1), p.get(i + 2), p.get(i + 3), p.get(i + 4)) {
                         (Some(5), Some(&n), _, _) => (Some(color256(n)), 2),
@@ -961,15 +1071,15 @@ impl Term {
                 return;
             }
             let i = self.cur.y * self.cols + self.cur.x;
-            self.grid[i] = Cell { ch: ' ', flags: WRAP, ..Cell::blank(self.cur.bg) };
+            self.grid[i] = Cell { ch: ' ', flags: WRAP, underline: 0, ul_color: u32::MAX, link: self.current_link, ..Cell::blank(self.cur.bg) };
             self.cur.x = 0;
             self.linefeed();
         }
         let i = self.cur.y * self.cols + self.cur.x;
         let Cursor { fg, bg, flags, .. } = self.cur;
-        self.grid[i] = Cell { ch, fg, bg, flags };
+        self.grid[i] = Cell { ch, fg, bg, flags, underline: self.cur.underline, ul_color: self.cur.underline_color, link: self.current_link };
         if width == 2 {
-            self.grid[i + 1] = Cell { ch: ' ', fg, bg, flags: flags | TAIL };
+            self.grid[i + 1] = Cell { ch: ' ', fg, bg, flags: flags | TAIL, underline: self.cur.underline, ul_color: self.cur.underline_color, link: self.current_link };
         }
         self.last = ch;
         if self.cur.x + width < self.cols {
